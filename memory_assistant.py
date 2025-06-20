@@ -152,6 +152,97 @@ def save_memory_cue(key, value):
         pass
 
 # ----------------------------
+# LOVED ONES DATA PERSISTENCE
+LOVED_ONES_FILE = "loved_ones.json"
+
+def save_loved_ones():
+    """Save loved ones data to file"""
+    try:
+        loved_ones_data = []
+        for face in st.session_state.known_faces:
+            if face.get("loved_one"):
+                # Convert numpy array to list for JSON serialization
+                face_data = {
+                    "name": face["name"],
+                    "description": face["description"],
+                    "loved_one": face["loved_one"],
+                    "face_img_gray": face["face_img_gray"].tolist() if hasattr(face["face_img_gray"], 'tolist') else face["face_img_gray"],
+                    "display_img": face["display_img"].tolist() if hasattr(face["display_img"], 'tolist') else face["display_img"]
+                }
+                loved_ones_data.append(face_data)
+        
+        with open(LOVED_ONES_FILE, "w", encoding="utf-8") as f:
+            json.dump(loved_ones_data, f)
+    except Exception as e:
+        st.error(f"Error saving loved ones: {e}")
+
+def load_loved_ones():
+    """Load loved ones data from file"""
+    try:
+        if os.path.exists(LOVED_ONES_FILE):
+            with open(LOVED_ONES_FILE, "r", encoding="utf-8") as f:
+                loved_ones_data = json.load(f)
+            
+            # Convert list back to numpy array and add unique IDs if missing
+            for face_data in loved_ones_data:
+                # Compatibility for old data using "face_img"
+                if "face_img" in face_data and "face_img_gray" not in face_data:
+                    face_data["face_img_gray"] = face_data.pop("face_img")
+
+                if "face_img_gray" in face_data and isinstance(face_data["face_img_gray"], list):
+                    face_data["face_img_gray"] = np.array(face_data["face_img_gray"], dtype=np.uint8)
+                
+                if "display_img" in face_data and isinstance(face_data["display_img"], list):
+                    face_data["display_img"] = np.array(face_data["display_img"], dtype=np.uint8)
+
+                # --- Data Migration: Add unique ID if it doesn't exist ---
+                if "id" not in face_data:
+                    face_data["id"] = str(uuid.uuid4())
+            
+            return loved_ones_data
+        return []
+    except Exception as e:
+        st.error(f"Error loading loved ones: {e}")
+        return []
+
+# ----------------------------
+# CENTRALIZED FACE MANAGEMENT
+# ----------------------------
+
+def add_or_update_known_face(name, description, face_img_gray, is_loved_one, face_id=None, display_img=None):
+    """
+    Adds a new face or updates an existing one in st.session_state.known_faces.
+    A new face is assigned a unique ID.
+    """
+    if face_id:
+        # This is an update to an existing face
+        for face in st.session_state.known_faces:
+            if face.get("id") == face_id:
+                face["name"] = name
+                face["description"] = description
+                face["loved_one"] = is_loved_one
+                # Optionally update face_img if a new one is provided
+                if face_img_gray is not None:
+                    face["face_img_gray"] = face_img_gray
+                if display_img is not None:
+                    face["display_img"] = display_img
+                break
+    else:
+        # This is a new face
+        new_face = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "description": description,
+            "face_img_gray": face_img_gray,
+            "display_img": display_img,
+            "loved_one": is_loved_one
+        }
+        st.session_state.known_faces.append(new_face)
+    
+    # Persist changes to the file
+    save_loved_ones()
+
+# ----------------------------
 # CAMERA SECTION
 # facial recognition of loved ones by uploading or taking a photo
 
@@ -257,9 +348,13 @@ def main():
     if "selected_page" not in st.session_state:
         st.session_state.selected_page = None
     if "known_faces" not in st.session_state:
-        st.session_state.known_faces = []
+        # Load existing loved ones from file
+        saved_loved_ones = load_loved_ones()
+        st.session_state.known_faces = saved_loved_ones
     if "gallery" not in st.session_state:
         st.session_state.gallery = []
+    if 'just_added_loved_one' not in st.session_state:
+        st.session_state.just_added_loved_one = None
 
     if st.session_state.selected_page is None:
         landing_page()
@@ -354,7 +449,7 @@ def main():
                 def recognize_face(face_img_gray, threshold=2000):
                     # Compare the detected face with known faces by MSE; lower MSE means more similar
                     for known in st.session_state.known_faces:
-                        known_face = known["face_img"]
+                        known_face = known["face_img_gray"]
                         if known_face.shape != face_img_gray.shape:
                             # Resize known face to match detected face shape
                             known_face_resized = cv2.resize(known_face, (face_img_gray.shape[1], face_img_gray.shape[0]))
@@ -415,13 +510,11 @@ def main():
                                     
                                     loved = st.checkbox(f"Add {face_name} to Loved Ones?", key=f"loved_{i}")
                                     if st.button(f"Save face #{i+1} info", key=f"saveface_{i}"):
-                                        st.session_state.known_faces.append({
-                                            "face_img": face_img_gray,
-                                            "name": face_name,
-                                            "description": face_desc,
-                                            "loved_one": loved
-                                        })
-                                        st.success(f"Saved face #{i+1} as {face_name}")
+                                        # Also grab the color crop for display
+                                        color_crop = img_cv[y:y+h, x:x+w]
+                                        color_crop_rgb = cv2.cvtColor(color_crop, cv2.COLOR_BGR2RGB)
+                                        add_or_update_known_face(face_name, face_desc, face_img_gray, loved, display_img=color_crop_rgb)
+                                        st.rerun()
 
                         st.image(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB), use_container_width=True)
 
@@ -489,13 +582,10 @@ def main():
 
                                 loved = st.checkbox(f"Add {face_name} to Loved Ones?", key=f"loved_{i}")
                                 if st.button(f"Save face #{i+1} info", key=f"saveface_{i}"):
-                                    st.session_state.known_faces.append({
-                                        "face_img": face_img_gray,
-                                        "name": face_name,
-                                        "description": face_desc,
-                                        "loved_one": loved
-                                    })
-                                    st.success(f"Saved face #{i+1} as {face_name}")
+                                    color_crop = frame[y:y+h, x:x+w]
+                                    color_crop_rgb = cv2.cvtColor(color_crop, cv2.COLOR_BGR2RGB)
+                                    add_or_update_known_face(face_name, face_desc, face_img_gray, loved, display_img=color_crop_rgb)
+                                    st.rerun()
 
                     st.image(frame, channels="BGR", use_container_width=True)
 
@@ -533,36 +623,154 @@ def main():
                 loved_faces = [f for f in st.session_state.known_faces if f.get("loved_one")]
 
                 if loved_faces:
-                    # Create columns
-                    col1, col2, col3 = st.columns(3)
-                    cols = [col1, col2, col3]
-                    col_heights = [0, 0, 0]
+                    # Create columns for the grid layout
+                    cols = st.columns(3)
+                    
+                    # Distribute loved ones into columns in a round-robin fashion
+                    for i, face in enumerate(loved_faces):
+                        with cols[i % 3]:
+                            with st.container(border=True):
+                                # Use the unique ID for the key to ensure components are unique
+                                face_key = face.get("id", f"face_{face['name'].replace(' ', '_')}_{i}")
+                                
+                                st.markdown(f"### {face['name']}")
+                                
+                                # Set a minimum height for the description area for consistent card height
+                                description_text = face.get("description", "")
+                                st.markdown(
+                                    f'<div style="word-wrap: break-word; overflow-wrap: break-word; min-height: 80px;">'
+                                    f'📝 {description_text}'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
 
-                    # Estimate "height" for each card
-                    def estimate_height(face):
-                        desc_lines = len(face.get("description", "").split("\n"))
-                        desc_lines += len(face.get("description", "")) // 50  # wrap estimate
-                        return 3 + desc_lines  # 3 lines: name, icon+desc, image
-
-                    # Sort faces into the column with the lowest total height
-                    for face in loved_faces:
-                        est_height = estimate_height(face)
-                        col_idx = col_heights.index(min(col_heights))  # column with least height
-                        col_heights[col_idx] += est_height
-
-                        with cols[col_idx]:
-                            st.markdown(f"### {face['name']}")
-                            if face.get("description"):
-                                st.write(f"📝 {face['description']}")
-                            face_img = cv2.resize(face["face_img"], (150, 150))
-                            face_img_color = cv2.cvtColor(face_img, cv2.COLOR_GRAY2RGB)
-                            st.image(face_img_color, channels="RGB")
+                                # Display face image with a placeholder
+                                display_image_data = face.get("display_img")
+                                if display_image_data is not None and isinstance(display_image_data, np.ndarray):
+                                    display_image_resized = cv2.resize(display_image_data, (150, 150))
+                                    st.image(display_image_resized, channels="RGB")
+                                elif isinstance(face.get("face_img_gray"), np.ndarray):
+                                    face_img = cv2.resize(face["face_img_gray"], (150, 150))
+                                    face_img_color = cv2.cvtColor(face_img, cv2.COLOR_GRAY2RGB)
+                                    st.image(face_img_color, channels="RGB")
+                                else:
+                                    # Image placeholder to maintain layout consistency
+                                    st.markdown(
+                                        '<div style="height: 150px; display: flex; align-items: center; '
+                                        'justify-content: center; background-color: #f0f2f6; border-radius: 8px;">'
+                                        'No photo'
+                                        '</div>', 
+                                        unsafe_allow_html=True
+                                    )
+                                
+                                # Edit and Delete buttons
+                                col_edit, col_delete = st.columns(2)
+                                with col_edit:
+                                    if st.button("✏️ Edit", key=f"edit_{face_key}"):
+                                        st.session_state.editing_face = face
+                                        st.session_state.edit_face_index = st.session_state.known_faces.index(face)
+                                        st.rerun() # Rerun to bring the edit form into view
+                                with col_delete:
+                                    if st.button("🗑️ Delete", key=f"delete_{face_key}"):
+                                        face_to_remove = next((f for f in st.session_state.known_faces if f.get("id") == face.get("id")), None)
+                                        if face_to_remove:
+                                            st.session_state.known_faces.remove(face_to_remove)
+                                            save_loved_ones()
+                                            st.success(f"Removed {face['name']} from loved ones")
+                                            st.rerun()
+                            
+                            # Add vertical space between cards in the same column
+                            st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    # Edit form (appears when editing)
+                    if "editing_face" in st.session_state:
+                        st.markdown("---")
+                        st.subheader(f"✏️ Edit {st.session_state.editing_face['name']}")
+                        
+                        with st.form("edit_loved_one"):
+                            new_name = st.text_input("Name", value=st.session_state.editing_face['name'])
+                            new_desc = st.text_area("Description", value=st.session_state.editing_face['description'])
+                            
+                            col_save, col_cancel = st.columns(2)
+                            with col_save:
+                                if st.form_submit_button("💾 Save Changes"):
+                                    face_id = st.session_state.editing_face.get("id")
+                                    is_loved = st.session_state.editing_face.get("loved_one", True)
+                                    add_or_update_known_face(new_name, new_desc, None, is_loved, face_id=face_id)
+                                    
+                                    del st.session_state.editing_face
+                                    del st.session_state.edit_face_index
+                                    st.success("Changes saved!")
+                                    st.rerun()
+                            with col_cancel:
+                                if st.form_submit_button("❌ Cancel"):
+                                    del st.session_state.editing_face
+                                    del st.session_state.edit_face_index
+                                    st.rerun()
                 else:
                     st.write("You haven't added any loved ones yet.")
+                    st.info("💡 Tip: You can add loved ones from the Face Recognition section or use the 'Add Loved One' tab above.")
 
             with tab2:
-                # ... your add loved one code ...
-                pass
+                if st.session_state.get('just_added_loved_one'):
+                    st.success(f"✅ {st.session_state.just_added_loved_one} has been added to your loved ones!")
+                    st.info("You can view them in the 'View Loved Ones' tab.")
+                    if st.button("➕ Add Another Loved One"):
+                        st.session_state.just_added_loved_one = None
+                        st.rerun()
+                else:
+                    st.subheader("➕ Add a New Loved One")
+                    
+                    with st.form("add_loved_one"):
+                        loved_name = st.text_input("Name", placeholder="Enter their name")
+                        loved_desc = st.text_area("Description", placeholder="Tell me about this person...")
+                        
+                        photo_option = st.radio("Add a photo?", ["No photo", "Upload photo"])
+                        
+                        # The file uploader widget is now created unconditionally
+                        uploaded_photo = st.file_uploader("Choose a photo", type=["jpg", "jpeg", "png"], key="loved_photo")
+
+                        # Show a preview only if the option is selected AND a file is uploaded
+                        if photo_option == "Upload photo" and uploaded_photo is not None:
+                            image = Image.open(uploaded_photo)
+                            st.image(image, caption="Preview", width=200)
+                        
+                        submitted = st.form_submit_button("Add Loved One")
+
+                        if submitted:
+                            if not (loved_name and loved_desc):
+                                st.error("Please provide both name and description.")
+                            else:
+                                with st.spinner("Adding..."):
+                                    face_img_gray, display_img = None, None
+                                    photo_processed_successfully = False
+
+                                    if photo_option == "No photo":
+                                        # Create a simple placeholder image for both
+                                        face_img_gray = np.zeros((100, 100), dtype=np.uint8)
+                                        face_img_gray.fill(128)  # Gray background
+                                        display_img = cv2.cvtColor(face_img_gray, cv2.COLOR_GRAY2RGB)
+                                        photo_processed_successfully = True
+                                    
+                                    elif photo_option == "Upload photo":
+                                        if uploaded_photo is not None:
+                                            # Process the image to get both color and grayscale versions
+                                            image = Image.open(uploaded_photo)
+                                            image = ImageOps.exif_transpose(image)
+                                            
+                                            display_image = ImageOps.fit(image, (200, 200), method=Image.Resampling.LANCZOS)
+                                            display_img = np.array(display_image)
+                                            
+                                            gray = cv2.cvtColor(display_img, cv2.COLOR_RGB2GRAY)
+                                            face_img_gray = cv2.resize(gray, (100, 100))
+                                            photo_processed_successfully = True
+                                        else:
+                                            st.error("You selected 'Upload photo'. Please upload a file or select 'No photo'.")
+
+                                    if photo_processed_successfully:
+                                        add_or_update_known_face(loved_name, loved_desc, face_img_gray, True, display_img=display_img)
+                                        st.session_state.just_added_loved_one = loved_name
+                                        st.rerun()
 
         elif st.session_state.selected_page == "gallery":
             st.header("🖼️ Memory Gallery")
