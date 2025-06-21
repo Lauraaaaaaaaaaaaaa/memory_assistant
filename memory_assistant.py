@@ -586,7 +586,7 @@ def main():
                                     color_crop_rgb = cv2.cvtColor(color_crop, cv2.COLOR_BGR2RGB)
                                     add_or_update_known_face(face_name, face_desc, face_img_gray, loved, display_img=color_crop_rgb)
                                     st.rerun()
-
+ 
                     st.image(frame, channels="BGR", use_container_width=True)
 
                     description = st.text_input("Enter photo description", key="camera_desc")
